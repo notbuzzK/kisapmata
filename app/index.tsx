@@ -1,9 +1,11 @@
 import { StyleSheet, Text, View, Button, TouchableOpacity, ActivityIndicator } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo, } from 'react';
+import { ThemedText } from '@/components/themed-text';
 
 // IMPORTANT: Replace this with your laptop's IPv4 address (run 'ipconfig' on Windows)
-const LAPTOP_IP = "192.168.68.110"; 
+// change this every time
+const LAPTOP_IP = "192.168.68.107"; 
 const SERVER_URL = `http://${LAPTOP_IP}:8000/detect`;
 
 export default function HomeScreen() {
@@ -12,6 +14,28 @@ export default function HomeScreen() {
   const [isDetecting, setIsDetecting] = useState(false);
   const [detections, setDetections] = useState([]);
   const cameraRef = useRef<CameraView>(null);
+  const [layout, setLayout] = useState({ width: 0, height: 0 });
+
+  // This ensures that as soon as you hit Stop, the boxes vanish
+  useEffect(() => {
+    if (!isDetecting) {
+      setDetections([]);
+    }
+  }, [isDetecting]);
+
+  // Also, clear boxes if the camera is turned off manually
+  useEffect(() => {
+    if (!isCameraOn) {
+      setDetections([]);
+      setIsDetecting(false); // Safety: stop detection if camera is killed
+    }
+  }, [isCameraOn]);
+
+  // Capture the dimensions of the camera view area
+  const onLayout = (event: any) => {
+    const { width, height } = event.nativeEvent.layout;
+    setLayout({ width, height });
+  };
 
   // This function takes a picture and sends it to the server
   const processFrame = async () => {
@@ -27,7 +51,7 @@ export default function HomeScreen() {
 
       // 2. Prepare the form data
       const formData = new FormData();
-      // @ts-ignore (Form data typing can be finicky in RN)
+      // @ts-ignore
       formData.append('file', {
         uri: photo.uri,
         name: 'frame.jpg',
@@ -42,19 +66,28 @@ export default function HomeScreen() {
       });
 
       const data = await response.json();
+
+      // EXTRA GUARD: If the user clicked STOP while we were waiting 
+      // for the server, don't update the state and don't loop again.
+      if (!isDetecting) {
+          setDetections([]);
+          return;
+      }
+
       setDetections(data.detections);
 
-      // 4. If we are still in "Detecting" mode, do it again immediately
+      // 4. If still in "Detecting" mode, continue processing
       if (isDetecting) {
         processFrame();
       }
     } catch (error) {
       console.error("Detection Error:", error);
       setIsDetecting(false); // Stop on error
+      setDetections([]);
     }
   };
 
-  // Trigger the loop when isDetecting changes to true
+  // Trigger loop when isDetecting changes to true
   useEffect(() => {
     if (isDetecting) {
       processFrame();
@@ -74,88 +107,74 @@ export default function HomeScreen() {
 
   return (
     <View className='flex flex-row h-full bg-black'>
-      {/* LEFT SIDE: CAMERA & OVERLAY */}
-      <View className="w-3/5 relative">
-        {isCameraOn ? (
+      {/* LEFT SIDE */}
+      <View 
+        className="w-3/5 relative bg-black" 
+        onLayout={onLayout} // Detect size of this area
+      >
+        {isCameraOn && (
           <CameraView 
             ref={cameraRef} 
-            style={styles.camera} 
+            style={StyleSheet.absoluteFill} // Use absolute fill to prevent layout jumps
             facing="back"
-          >
-            {/* Draw Bounding Boxes here */}
-            {detections.map((det, index) => {
-               // We need to map server coordinates to screen %
-               // This is a simplified version
-               return (
-                 <View 
-                   key={index}
-                   style={{
-                     position: 'absolute',
-                     borderWidth: 2,
-                     borderColor: det.label === 'pole' ? 'yellow' : 'green',
-                     left: `${(det.box[0] / 640) * 100}%`, // Assuming 640px internal server res
-                     top: `${(det.box[1] / 480) * 100}%`,
-                     width: `${((det.box[2] - det.box[0]) / 640) * 100}%`,
-                     height: `${((det.box[3] - det.box[1]) / 480) * 100}%`,
-                   }}
-                 >
-                   <Text style={{color: 'white', backgroundColor: 'rgba(0,0,0,0.5)', fontSize: 10}}>
-                     {det.label} {det.confidence}% {det.distance}m
-                   </Text>
-                 </View>
-               );
-            })}
-          </CameraView>
-        ) : (
-          <View className="flex-1 items-center justify-center bg-gray-900">
-            <Text className="text-white">Camera is Off</Text>
-          </View>
+            animateShutter={false} // Prevents some flickering
+          />
         )}
-        
-        {/* On/Off Floating Button */}
-        <View className='absolute bottom-5 left-5'>
-           <Button onPress={() => setIsCameraOn(!isCameraOn)} title="Toggle Camera" />
+
+        {/* 2. THE OVERLAY: This sits on top and doesn't reset the camera */}
+        <View style={StyleSheet.absoluteFill} pointerEvents="none">
+          {/* ONLY show boxes if Camera is ON and we are in DETECTING mode */}
+          {isCameraOn && isDetecting && detections.map((det, index) => (
+            <View 
+              key={`box-${index}`}
+              style={{
+                position: 'absolute',
+                borderWidth: 2,
+                borderColor: det.label.toLowerCase().includes('pole') ? '#FACC15' : '#4ADE80',
+                left: det.box_2d[0] * layout.width,
+                top: det.box_2d[1] * layout.height,
+                width: (det.box_2d[2] - det.box_2d[0]) * layout.width,
+                height: (det.box_2d[3] - det.box_2d[1]) * layout.height,
+              }}
+            >
+              <View className="bg-black/50 self-start px-1">
+                <Text style={{fontSize: 10, color: 'white'}}>
+                  {det.label} {det.confidence}% | {det.distance}m
+                </Text>
+              </View>
+            </View>
+          ))}
+        </View>
+
+        {/* On/Off UI */}
+        <View className='absolute bottom-10 left-5'>
+           <Button onPress={() => setIsCameraOn(!isCameraOn)} title={isCameraOn ? "Camera Off" : "Camera On"} />
         </View>
       </View>
 
-      {/* RIGHT SIDE: INFO & CONTROLS */}
-      <View className="w-2/5 bg-gray-800 border-l border-gray-700">
-        <View className="flex flex-col h-full">
-          {/* Detected Obstacles List (Matches your Fig 3) */}
-          <View className='flex-1 p-4'>
-            <Text className='text-white font-bold text-xl mb-4'>Detected Obstacles:</Text>
-            {detections.length === 0 && <Text className='text-gray-400'>No obstacles detected.</Text>}
+      {/* RIGHT SIDE (Obstacles List) */}
+      <View className="w-2/5 bg-gray-900 p-4 border-l border-gray-800">
+         <Text className="text-white font-bold text-lg mb-4">Detected Obstacles</Text>
+         <View className="flex-1">
             {detections.map((det, i) => (
-              <View key={i} className='flex flex-row justify-between mb-2 bg-gray-700 p-2 rounded'>
-                <Text className='text-white'>{det.label}</Text>
-                <View className='flex flex-col justify-end'>
-                  <Text className='text-green-400'>{det.distance}m</Text>
-                  <Text className='text-green-400 justify-end'>{det.confidence}%</Text>
+              <View key={i} className="flex-row justify-between p-2 mb-2 bg-gray-800 rounded-lg">
+                <View>
+                  <Text className="text-white font-semibold capitalize">{det.label}</Text>
+                  <Text className="text-gray-400 text-xs">{det.confidence}% confidence</Text>
                 </View>
+                <Text className="text-green-400 font-bold self-center">{det.distance}m</Text>
               </View>
             ))}
-          </View>
-
-          {/* Start/Stop Controls */}
-          <View className='h-[20%] bg-gray-900 p-4 flex flex-row gap-4 justify-center items-center'>
-            {!isDetecting ? (
-              <TouchableOpacity 
-                onPress={() => setIsDetecting(true)}
-                className='bg-green-600 px-8 py-3 rounded-full'
-              >
-                <Text className='text-white font-bold'>DETECT</Text>
-              </TouchableOpacity>
-            ) : (
-              <TouchableOpacity 
-                onPress={() => setIsDetecting(false)}
-                className='bg-red-600 px-8 py-3 rounded-full'
-              >
-                <Text className='text-white font-bold'>STOP</Text>
-              </TouchableOpacity>
-            )}
-            {isDetecting && <ActivityIndicator color="#fff" />}
-          </View>
-        </View>
+         </View>
+         
+         <View className="flex-row gap-2 mt-4">
+            <TouchableOpacity 
+              onPress={() => setIsDetecting(!isDetecting)}
+              className={`${isDetecting ? 'bg-red-600' : 'bg-green-600'} flex-1 py-4 rounded-xl items-center`}
+            >
+              <Text className="text-white font-bold">{isDetecting ? 'STOP' : 'DETECT'}</Text>
+            </TouchableOpacity>
+         </View>
       </View>
     </View>
   );
