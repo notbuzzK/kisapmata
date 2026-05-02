@@ -20,7 +20,11 @@
       },
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
-      "bundler": "metro"
+      "bundler": "metro",
+      "permissions": [
+        "android.permission.CAMERA"
+      ],
+      "package": "com.notbuzz.kisapmata"
     },
     "web": {
       "output": "static",
@@ -63,11 +67,30 @@
           "recordAudioAndroid": false,
           "barcodeScannerEnabled": true
         }
+      ],
+      [
+      "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true
+          }
+        }
       ]
     ],
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
+    },
+    "extra": {
+      "router": {},
+      "expo-navigation-bar": {
+        "enforceContrast": true,
+        "barStyle": "light",
+        "visibility": "visible"
+      },
+      "eas": {
+        "projectId": "77562dd4-5d60-4666-b727-d6d2b7ebe06e"
+      }
     }
   }
 }

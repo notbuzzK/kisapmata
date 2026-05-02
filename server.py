@@ -235,27 +235,31 @@ def run_hybrid(img_bgr, conf=0.3):
         })
     return detections
 
-def run_hybrid_inference(img_path, conf_thresh=0.1):
-    img_resized = cv2.resize(img_path, (TARGET_SIZE, TARGET_SIZE))
+def run_hybrid_inference(img_bgr, conf_thresh=0.3):
+    img_resized = cv2.resize(img_bgr, (TARGET_SIZE, TARGET_SIZE))
     img_tensor  = (torch.from_numpy(img_resized / 255.)
                        .permute(2, 0, 1).float().unsqueeze(0).to(DEVICE))
 
-    torch.cuda.synchronize()
     t1 = time.time()
-
     with torch.no_grad():
         out_center = center_ft(img_tensor)[-1]
-
-    torch.cuda.synchronize()
     latency = time.time() - t1
 
-    # ── CenterNet decode only
     boxes, scores, labels = decode_centernet(out_center, TARGET_SIZE, conf_thresh)
 
     if len(boxes) == 0:
-        return [], [], [], latency
+        return []
 
-    return boxes.tolist(), scores.tolist(), labels.tolist(), latency
+    detections = []
+    for box, score, lbl in zip(boxes, scores, labels):
+        lbl_int = max(0, min(4, int(round(lbl))))
+        x1, y1, x2, y2 = box
+        detections.append({
+            "label":      CLASS_NAMES[lbl_int],
+            "confidence": round(float(score) * 100),
+            "box_2d":     [float(x1), float(y1), float(x2), float(y2)],
+        })
+    return detections
 
 # ── ROUTES ─────────────────────────────────────────────────────────────────────
 @app.get("/config")
@@ -281,6 +285,9 @@ def set_config(model_name: str):
     active_config["model"] = model_name
     return {"active_model": model_name, "status": "switched"}
 
+@app.get("/ping")
+def ping():
+    return {"status": "ok"}
 
 @app.post("/detect")
 async def detect_objects(file: UploadFile = File(...)):

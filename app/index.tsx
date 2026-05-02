@@ -4,10 +4,6 @@ import { CameraView, useCameraPermissions } from 'expo-camera';
 import { useState, useEffect, useRef } from 'react';
 import * as ScreenOrientation from 'expo-screen-orientation';
 
-
-const LAPTOP_IP  = "192.168.68.100";   // update as needed
-const SERVER_URL = `http://${LAPTOP_IP}:8000`;
-
 const MODEL_OPTIONS = [
   { key: "yolo_pretrained",  label: "YOLO\nPretrained",  color: "#6B7280" },
   { key: "yolo_finetuned",   label: "YOLO\nFine-Tuned",  color: "#16A34A" },
@@ -51,38 +47,80 @@ export default function HomeScreen() {
     if (modelKey === activeModel) return;
     setSwitching(true);
     setIsDetecting(false);
-    try {
-      await fetch(`${serverUrl}/config/${modelKey}`, { method: 'POST' });
-      setActiveModel(modelKey);
-    } catch (e) {
-      console.error("Failed to switch model:", e);
-    }
-    setSwitching(false);
+    return new Promise<void>((resolve) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', `${serverUrl}/config/${modelKey}`);
+      xhr.onload = () => {
+        setActiveModel(modelKey);
+        setSwitching(false);
+        resolve();
+      };
+      xhr.onerror = () => {
+        console.error("Failed to switch model");
+        setSwitching(false);
+        resolve();
+      };
+      xhr.send();
+    });
+  };
+
+  const testConnection = async () => {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('GET', `${serverUrl}/ping`);
+      xhr.onload = () => {
+        alert(`XHR response: ${xhr.responseText}`);
+        resolve(xhr.responseText);
+      };
+      xhr.onerror = () => {
+        alert(`XHR failed: status=${xhr.status} response=${xhr.responseText}`);
+        reject();
+      };
+      xhr.send();
+    });
   };
 
   // ── Frame processing loop ─────────────────────────────────────────────────
   const processFrame = async () => {
-    if (!cameraRef.current || !isDetecting) return;
+    if (!cameraRef.current || !isDetecting) { setDetections([]); return; }
     try {
       const photo = await cameraRef.current.takePictureAsync({
         quality: 0.3, base64: false, skipProcessing: true,
       });
+
       const formData = new FormData();
       // @ts-ignore
       formData.append('file', {
         uri: photo.uri, name: 'frame.jpg', type: 'image/jpeg',
       });
-      const response = await fetch(`${serverUrl}/detect`, {
-        method: 'POST', body: formData,
-        headers: { 'Content-Type': 'multipart/form-data' },
+
+      await new Promise<void>((resolve) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', `${serverUrl}/detect`);
+        xhr.onload = () => {
+          if (!isDetecting) { setDetections([]); resolve(); return; }
+          try {
+            const data = JSON.parse(xhr.responseText);
+            setDetections(data.detections);
+          } catch (e) {
+            console.error("Parse error:", e);
+          }
+          resolve();
+        };
+        xhr.onerror = () => {
+          console.error("Detection request failed");
+          setIsDetecting(false);
+          setDetections([]);
+          resolve();
+        };
+        xhr.send(formData);
       });
-      const data = await response.json();
-      if (!isDetecting) { setDetections([]); return; }
-      setDetections(data.detections);
+
       if (isDetecting) processFrame();
     } catch (error) {
       console.error("Detection Error:", error);
-      setIsDetecting(false); setDetections([]);
+      setIsDetecting(false);
+      setDetections([]);
     }
   };
 
@@ -129,9 +167,12 @@ export default function HomeScreen() {
               Current: {laptopIp}
             </Text>
             <TouchableOpacity
+            
               onPress={() => {
                 setLaptopIp(tempIp);
                 setIsDetecting(false);
+                setDetections([]);
+                setIsCameraOn(false);
                 setIsSettingsOpen(false);
               }}
               style={{marginTop:16, backgroundColor:'#16A34A',
@@ -289,6 +330,7 @@ export default function HomeScreen() {
         {/* Detect / Stop button */}
         <TouchableOpacity
           onPress={() => setIsDetecting(!isDetecting)}
+          // onPress={() => testConnection()}
           disabled={!isCameraOn}
           style={{
             backgroundColor: !isCameraOn
