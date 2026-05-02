@@ -4,7 +4,7 @@ import { StatusBar } from 'expo-status-bar';
 import 'react-native-reanimated';
 import * as NavigationBar from 'expo-navigation-bar';
 import "../global.css";
-
+import { ReducedMotionConfig, ReduceMotion } from 'react-native-reanimated';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 
 import * as ScreenOrientation from 'expo-screen-orientation';
@@ -18,6 +18,7 @@ export default function RootLayout() {
 
   return (
     <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
+      <ReducedMotionConfig mode={ReduceMotion.Never} />
       <Stack>
         <Stack.Screen name="index" options={{ headerShown: false }} />
         <Stack.Screen name="modal" options={{ presentation: 'modal', title: 'Modal' }} />

@@ -3,7 +3,7 @@
     "name": "kisapmata",
     "slug": "kisapmata",
     "version": "1.0.0",
-    "orientation": "portrait",
+    "orientation": "landscape",
     "icon": "./assets/images/icon.png",
     "scheme": "kisapmata",
     "userInterfaceStyle": "automatic",
@@ -44,7 +44,7 @@
       [
         "expo-screen-orientation",
         {
-          "initialOrientation": "DEFAULT"
+          "initialOrientation": "LANDSCAPE_RIGHT"
         }
       ],
       [
