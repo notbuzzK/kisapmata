@@ -22,7 +22,9 @@
       "predictiveBackGestureEnabled": false,
       "bundler": "metro",
       "permissions": [
-        "android.permission.CAMERA"
+        "android.permission.CAMERA",
+        "VIBRATE",
+        "USE_VIBRATE"
       ],
       "package": "com.notbuzz.kisapmata"
     },

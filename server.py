@@ -24,7 +24,7 @@ app.add_middleware(
 DEVICE      = 'cuda' if torch.cuda.is_available() else 'cpu'
 TARGET_SIZE = 512
 NUM_CLASSES = 5
-CLASS_NAMES = ['barriers', 'foldout-signs', 'poles', 'railings', 'signs']
+CLASS_NAMES = ['barriers', 'foldout-signs', 'poles', 'railings', 'signs', 'curbs', 'potholes']
 
 # Get the directory where this script is located
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -36,6 +36,134 @@ SSD_FINETUNED_PATH    = os.path.join(SCRIPT_DIR, "models/ssd_custom.pth")
 # CENTER_FINETUNED_PATH = os.path.join(SCRIPT_DIR, "models/centernet_custom.pth")
 CENTER_FINETUNED_PATH = os.path.join(SCRIPT_DIR, "models/mobilenet_centernet_v2.pth")
 CENTER_BASE_WEIGHTS   = os.path.join(SCRIPT_DIR, "models/ctdet_coco_resdcn18.pth")
+
+# ── DISTANCE ESTIMATION CONFIG ─────────────────────────────────────────────────
+# Focal length approximated for Honor X9c main camera
+# at 512px input (scaled from native resolution)
+FOCAL_LENGTH_PX = 3000.0
+
+# Known average real-world widths in cm for COCO classes (all 80)
+# Placeholder values — tune these based on real measurements
+KNOWN_WIDTHS_CM = {
+    'person':           45,
+    'bicycle':         160,
+    'car':             180,
+    'motorcycle':       80,
+    'airplane':       3000,
+    'bus':             250,
+    'train':           300,
+    'truck':           250,
+    'boat':            300,
+    'traffic light':    30,
+    'fire hydrant':     25,
+    'stop sign':        60,
+    'parking meter':    15,
+    'bench':           150,
+    'bird':             20,
+    'cat':              25,
+    'dog':              40,
+    'horse':           150,
+    'sheep':            70,
+    'cow':             150,
+    'elephant':        250,
+    'bear':            150,
+    'zebra':           150,
+    'giraffe':         150,
+    'backpack':         30,
+    'umbrella':         90,
+    'handbag':          30,
+    'tie':              10,
+    'suitcase':         50,
+    'frisbee':          25,
+    'skis':             15,
+    'snowboard':        30,
+    'sports ball':      22,
+    'kite':            100,
+    'baseball bat':      7,
+    'baseball glove':   20,
+    'skateboard':       20,
+    'surfboard':        55,
+    'tennis racket':    25,
+    'bottle':            8,
+    'wine glass':        8,
+    'cup':               8,
+    'fork':              3,
+    'knife':             3,
+    'spoon':             3,
+    'bowl':             15,
+    'banana':           20,
+    'apple':             8,
+    'sandwich':         15,
+    'orange':            8,
+    'broccoli':         15,
+    'carrot':            5,
+    'hot dog':          12,
+    'pizza':            30,
+    'donut':            10,
+    'cake':             25,
+    'chair':            50,
+    'couch':           180,
+    'potted plant':     30,
+    'bed':             160,
+    'dining table':    120,
+    'toilet':           40,
+    'tv':              120,
+    'laptop':           35,
+    'mouse':            10,
+    'remote':           10,
+    'keyboard':         45,
+    'cell phone':        7,
+    'microwave':        45,
+    'oven':             60,
+    'toaster':          25,
+    'sink':             50,
+    'refrigerator':     70,
+    'book':             20,
+    'clock':            30,
+    'vase':             15,
+    'scissors':         10,
+    'teddy bear':       30,
+    'hair drier':       15,
+    'toothbrush':        2,
+}
+
+# Distance thresholds in cm
+NEAR_THRESHOLD   = 100   # < 1m = near (red)
+MEDIUM_THRESHOLD = 250   # 1m–2.5m = medium (orange)
+                         # > 2.5m = far (green)
+
+# Center zone: middle 40% of the camera frame width
+CENTER_ZONE_MIN = 0.30   # 30% from left
+CENTER_ZONE_MAX = 0.70   # 70% from left
+
+def estimate_distance(label: str, box_width_px: float) -> float | None:
+    """
+    Estimates distance in cm using known object width and focal length.
+    Returns None if the class has no known width or box is degenerate.
+    """
+    known_width = KNOWN_WIDTHS_CM.get(label)
+    if known_width is None or box_width_px < 5:
+        return None
+    return round((known_width * FOCAL_LENGTH_PX) / box_width_px, 1)
+
+def get_zone(distance_cm: float | None) -> str:
+    """Returns 'near', 'medium', 'far', or 'unknown'."""
+    if distance_cm is None:
+        return 'unknown'
+    if distance_cm < NEAR_THRESHOLD:
+        return 'near'
+    elif distance_cm < MEDIUM_THRESHOLD:
+        return 'medium'
+    else:
+        return 'far'
+
+def is_in_center_zone(box_2d: list) -> bool:
+    """
+    box_2d is [x1, y1, x2, y2] normalized 0-1.
+    Object center x must fall within CENTER_ZONE_MIN to CENTER_ZONE_MAX.
+    """
+    cx = (box_2d[0] + box_2d[2]) / 2
+    return CENTER_ZONE_MIN <= cx <= CENTER_ZONE_MAX
 
 # ── MODEL LOADING ──────────────────────────────────────────────────────────────
 print("Loading models...")
@@ -187,13 +315,27 @@ def run_yolo(img_bgr, model, conf=0.3):
         cls      = int(box.cls[0])
         conf_val = round(float(box.conf[0]) * 100)
         coords   = box.xyxy[0].tolist()
-        # results.names is always correct for whichever model is loaded
         label = results.names[cls]
+
+                # Normalized box
+        box_2d = [coords[0]/w, coords[1]/h, coords[2]/w, coords[3]/h]
+
+        # Box width in pixels (at actual image size, not TARGET_SIZE)
+        box_w_px = coords[2] - coords[0]
+
+        # Distance and zone
+        dist_cm  = estimate_distance(label, box_w_px)
+        zone     = get_zone(dist_cm)
+        in_center = is_in_center_zone(box_2d)
+
+
         detections.append({
             "label":      label,
             "confidence": conf_val,
-            "box_2d":     [coords[0]/w, coords[1]/h,
-                           coords[2]/w, coords[3]/h],
+            "box_2d":     box_2d,
+            "distance_cm": dist_cm,
+            "zone":        zone,          # 'near' | 'medium' | 'far' | 'unknown'
+            "important":   in_center,     # True if in center zone
         })
     return detections
 
@@ -228,10 +370,14 @@ def run_hybrid(img_bgr, conf=0.3):
         if score < conf: continue
         lbl_int = max(0, min(4, int(round(lbl))))
         x1, y1, x2, y2 = box
+        box_2d = [float(x1), float(y1), float(x2), float(y2)]
         detections.append({
-            "label":      CLASS_NAMES[lbl_int],
-            "confidence": round(float(score) * 100),
-            "box_2d":     [float(x1), float(y1), float(x2), float(y2)],
+            "label":       CLASS_NAMES[lbl_int],
+            "confidence":  round(float(score) * 100),
+            "box_2d":      box_2d,
+            "distance_cm": None,
+            "zone":        "unknown",
+            "important":   is_in_center_zone(box_2d),
         })
     return detections
 
@@ -254,14 +400,22 @@ def run_hybrid_inference(img_bgr, conf_thresh=0.3):
     for box, score, lbl in zip(boxes, scores, labels):
         lbl_int = max(0, min(4, int(round(lbl))))
         x1, y1, x2, y2 = box
+        box_2d = [float(x1), float(y1), float(x2), float(y2)]
         detections.append({
-            "label":      CLASS_NAMES[lbl_int],
-            "confidence": round(float(score) * 100),
-            "box_2d":     [float(x1), float(y1), float(x2), float(y2)],
+            "label":       CLASS_NAMES[lbl_int],
+            "confidence":  round(float(score) * 100),
+            "box_2d":      box_2d,
+            "distance_cm": None,
+            "zone":        "unknown",
+            "important":   is_in_center_zone(box_2d),
         })
     return detections
 
 # ── ROUTES ─────────────────────────────────────────────────────────────────────
+@app.get("/ping")
+def ping():
+    return {"status": "ok"}
+
 @app.get("/config")
 def get_config():
     """Returns current active model configuration."""
@@ -284,10 +438,6 @@ def set_config(model_name: str):
         )
     active_config["model"] = model_name
     return {"active_model": model_name, "status": "switched"}
-
-@app.get("/ping")
-def ping():
-    return {"status": "ok"}
 
 @app.post("/detect")
 async def detect_objects(file: UploadFile = File(...)):

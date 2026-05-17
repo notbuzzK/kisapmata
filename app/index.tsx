@@ -1,8 +1,10 @@
-import { StyleSheet, Text, View, Button, 
-         TouchableOpacity, ScrollView, Modal, TextInput } from 'react-native';
+import { StyleSheet, Text, View, Button,
+         TouchableOpacity, ScrollView, Modal,
+         TextInput, Vibration } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { useState, useEffect, useRef } from 'react';
 import * as ScreenOrientation from 'expo-screen-orientation';
+import * as Haptics from 'expo-haptics';
 
 const MODEL_OPTIONS = [
   { key: "yolo_pretrained",  label: "YOLO\nPretrained",  color: "#6B7280" },
@@ -10,26 +12,45 @@ const MODEL_OPTIONS = [
   { key: "hybrid_finetuned", label: "Hybrid\nFine-Tuned", color: "#2563EB" },
 ];
 
+// Zone color map — only applies to important (center zone) objects
+const ZONE_COLORS: Record<string, string> = {
+  near:    '#EF4444',   // red
+  medium:  '#F97316',   // orange
+  far:     '#22C55E',   // green
+  unknown: '#FFFFFF',   // white fallback
+};
+
+// Vibration patterns per zone (ms)
+const ZONE_VIBRATION: Record<string, number[]> = {
+  near:   [0, 80, 60, 80, 60, 80],   // three short pulses
+  medium: [0, 80, 60, 80],            // two short pulses
+  far:    [0, 120],                   // one pulse
+};
+
+const HAPTIC_COOLDOWN_MS = 3000;
+
 export default function HomeScreen() {
   const [permission, requestPermission] = useCameraPermissions();
-  const [isCameraOn,   setIsCameraOn]   = useState(false);
-  const [isDetecting,  setIsDetecting]  = useState(false);
-  const [detections,   setDetections]   = useState([]);
-  const [activeModel,  setActiveModel]  = useState("yolo_finetuned");
-  const [switching,    setSwitching]    = useState(false);
-  const cameraRef = useRef<CameraView>(null);
-  const [layout,   setLayout]   = useState({ width: 0, height: 0 });
-  const [laptopIp, setLaptopIp] = useState("192.168.68.100");
-  const [tempIp, setTempIp]     = useState("192.168.68.100");
-  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isCameraOn,      setIsCameraOn]      = useState(false);
+  const [isDetecting,     setIsDetecting]     = useState(false);
+  const [detections,      setDetections]      = useState<any[]>([]);
+  const [activeModel,     setActiveModel]     = useState("yolo_finetuned");
+  const [switching,       setSwitching]       = useState(false);
+  const [laptopIp,        setLaptopIp]        = useState("192.168.68.100");
+  const [tempIp,          setTempIp]          = useState("192.168.68.100");
+  const [isSettingsOpen,  setIsSettingsOpen]  = useState(false);
+  const hapticEnabledRef = useRef(true);
+  const [hapticEnabledDisplay, setHapticEnabledDisplay] = useState(true);
+
+  const cameraRef        = useRef<CameraView>(null);
+  const layoutRef        = useRef({ width: 0, height: 0 });
+  const [layout,         setLayout]           = useState({ width: 0, height: 0 });
+  const lastHapticRef    = useRef<number>(0);   // timestamp of last haptic fire
 
   const serverUrl = `http://${laptopIp}:8000`;
 
   useEffect(() => {
-    async function lock() {
-      await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.LANDSCAPE_RIGHT);
-    }
-    lock();
+    ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.LANDSCAPE_RIGHT);
   }, []);
 
   useEffect(() => { if (!isDetecting) setDetections([]); }, [isDetecting]);
@@ -39,10 +60,30 @@ export default function HomeScreen() {
 
   const onLayout = (event: any) => {
     const { width, height } = event.nativeEvent.layout;
+    layoutRef.current = { width, height };
     setLayout({ width, height });
   };
 
-  // ── Switch model on server ────────────────────────────────────────────────
+  // ── Haptic trigger — respects cooldown and toggle ─────────────────────────
+  const triggerHaptic = (zone: string) => {
+    if (!hapticEnabledRef.current) return;
+    const now = Date.now();
+    if (now - lastHapticRef.current < HAPTIC_COOLDOWN_MS) return;
+    lastHapticRef.current = now;
+
+    // Use simple duration calls instead of pattern arrays
+    // Honor devices handle these more reliably
+    if (zone === 'near') {
+      Vibration.vibrate(500);        // one long 500ms buzz
+    } else if (zone === 'medium') {
+      Vibration.vibrate(250);        // medium 250ms buzz
+    } else if (zone === 'far') {
+      Vibration.vibrate(100);        // short 100ms buzz
+    }
+  };
+
+
+  // ── Switch model ──────────────────────────────────────────────────────────
   const switchModel = async (modelKey: string) => {
     if (modelKey === activeModel) return;
     setSwitching(true);
@@ -50,32 +91,8 @@ export default function HomeScreen() {
     return new Promise<void>((resolve) => {
       const xhr = new XMLHttpRequest();
       xhr.open('POST', `${serverUrl}/config/${modelKey}`);
-      xhr.onload = () => {
-        setActiveModel(modelKey);
-        setSwitching(false);
-        resolve();
-      };
-      xhr.onerror = () => {
-        console.error("Failed to switch model");
-        setSwitching(false);
-        resolve();
-      };
-      xhr.send();
-    });
-  };
-
-  const testConnection = async () => {
-    return new Promise((resolve, reject) => {
-      const xhr = new XMLHttpRequest();
-      xhr.open('GET', `${serverUrl}/ping`);
-      xhr.onload = () => {
-        alert(`XHR response: ${xhr.responseText}`);
-        resolve(xhr.responseText);
-      };
-      xhr.onerror = () => {
-        alert(`XHR failed: status=${xhr.status} response=${xhr.responseText}`);
-        reject();
-      };
+      xhr.onload  = () => { setActiveModel(modelKey); setSwitching(false); resolve(); };
+      xhr.onerror = () => { setSwitching(false); resolve(); };
       xhr.send();
     });
   };
@@ -90,9 +107,7 @@ export default function HomeScreen() {
 
       const formData = new FormData();
       // @ts-ignore
-      formData.append('file', {
-        uri: photo.uri, name: 'frame.jpg', type: 'image/jpeg',
-      });
+      formData.append('file', { uri: photo.uri, name: 'frame.jpg', type: 'image/jpeg' });
 
       await new Promise<void>((resolve) => {
         const xhr = new XMLHttpRequest();
@@ -101,26 +116,29 @@ export default function HomeScreen() {
           if (!isDetecting) { setDetections([]); resolve(); return; }
           try {
             const data = JSON.parse(xhr.responseText);
-            setDetections(data.detections);
-          } catch (e) {
-            console.error("Parse error:", e);
-          }
+            const dets: any[] = data.detections ?? [];
+            setDetections(dets);
+
+            // Haptic: find the highest priority important detection
+            // Priority: near > medium > far
+            const important = dets.filter((d: any) => d.important);
+            const nearObj   = important.find((d: any) => d.zone === 'near');
+            const medObj    = important.find((d: any) => d.zone === 'medium');
+            const farObj    = important.find((d: any) => d.zone === 'far');
+            const trigger   = nearObj ?? medObj ?? farObj;
+            if (trigger) triggerHaptic(trigger.zone);
+
+          } catch (e) { console.error("Parse error:", e); }
           resolve();
         };
-        xhr.onerror = () => {
-          console.error("Detection request failed");
-          setIsDetecting(false);
-          setDetections([]);
-          resolve();
-        };
+        xhr.onerror = () => { setIsDetecting(false); setDetections([]); resolve(); };
         xhr.send(formData);
       });
 
       if (isDetecting) processFrame();
     } catch (error) {
       console.error("Detection Error:", error);
-      setIsDetecting(false);
-      setDetections([]);
+      setIsDetecting(false); setDetections([]);
     }
   };
 
@@ -138,23 +156,20 @@ export default function HomeScreen() {
 
   const activeModelLabel = MODEL_OPTIONS.find(m => m.key === activeModel)?.label ?? "";
   const activeModelColor = MODEL_OPTIONS.find(m => m.key === activeModel)?.color ?? "#fff";
-  
+
   return (
     <View className='flex flex-row h-full bg-black'>
 
-      {/* ── SETTINGS MODAL — inlined directly, not as a sub-component ── */}
+      {/* ── SETTINGS MODAL ────────────────────────────────────────────── */}
       <Modal visible={isSettingsOpen} transparent animationType="fade">
         <View style={{flex:1, backgroundColor:'rgba(0,0,0,0.8)',
                       justifyContent:'center', alignItems:'center'}}>
-          <View style={{backgroundColor:'#222', borderRadius:15,
-                        width:'50%', padding:20}}>
-            <Text style={{color:'white', fontWeight:'bold',
-                          fontSize:14, marginBottom:10}}>
+          <View style={{backgroundColor:'#222', borderRadius:15, width:'50%', padding:20}}>
+            <Text style={{color:'white', fontWeight:'bold', fontSize:14, marginBottom:10}}>
               Server IP Address
             </Text>
             <TextInput
-              style={{backgroundColor:'#444', color:'white',
-                      padding:10, borderRadius:5, fontSize:14}}
+              style={{backgroundColor:'#444', color:'white', padding:10, borderRadius:5, fontSize:14}}
               value={tempIp}
               onChangeText={setTempIp}
               placeholder="192.168.x.x"
@@ -167,7 +182,6 @@ export default function HomeScreen() {
               Current: {laptopIp}
             </Text>
             <TouchableOpacity
-            
               onPress={() => {
                 setLaptopIp(tempIp);
                 setIsDetecting(false);
@@ -175,30 +189,23 @@ export default function HomeScreen() {
                 setIsCameraOn(false);
                 setIsSettingsOpen(false);
               }}
-              style={{marginTop:16, backgroundColor:'#16A34A',
-                      padding:12, borderRadius:8}}
+              style={{marginTop:16, backgroundColor:'#16A34A', padding:12, borderRadius:8}}
             >
-              <Text style={{color:'white', textAlign:'center',
-                            fontWeight:'bold'}}>
+              <Text style={{color:'white', textAlign:'center', fontWeight:'bold'}}>
                 Save & Close
               </Text>
             </TouchableOpacity>
             <TouchableOpacity
-              onPress={() => {
-                setTempIp(laptopIp);
-                setIsSettingsOpen(false);
-              }}
+              onPress={() => { setTempIp(laptopIp); setIsSettingsOpen(false); }}
               style={{marginTop:8, padding:10}}
             >
-              <Text style={{color:'#9CA3AF', textAlign:'center'}}>
-                Cancel
-              </Text>
+              <Text style={{color:'#9CA3AF', textAlign:'center'}}>Cancel</Text>
             </TouchableOpacity>
           </View>
         </View>
       </Modal>
 
-      {/* ── LEFT: Camera + Overlays ──────────────────────────────────── */}
+      {/* ── LEFT: Camera ─────────────────────────────────────────────── */}
       <View className="w-3/5 relative bg-black" onLayout={onLayout}>
         {isCameraOn && (
           <CameraView
@@ -207,6 +214,20 @@ export default function HomeScreen() {
             facing="back"
             animateShutter={false}
           />
+        )}
+
+        {/* Center zone indicator — subtle vertical band */}
+        {isCameraOn && isDetecting && (
+          <View pointerEvents="none" style={{
+            position:    'absolute',
+            left:        layout.width * 0.30,
+            width:       layout.width * 0.40,
+            top:         0,
+            bottom:      0,
+            borderLeftWidth:  1,
+            borderRightWidth: 1,
+            borderColor: 'rgba(255,255,255,0.15)',
+          }} />
         )}
 
         {/* Active model badge — top left */}
@@ -220,29 +241,59 @@ export default function HomeScreen() {
           </Text>
         </View>
 
+        {/* Haptic toggle — top right */}
+        <TouchableOpacity
+          onPress={() => {
+            hapticEnabledRef.current = !hapticEnabledRef.current;
+            setHapticEnabledDisplay(hapticEnabledRef.current);  // just for UI display
+          }}
+          style={{
+            position:'absolute', top:12, right:12,
+            backgroundColor: hapticEnabledDisplay
+              ? 'rgba(34,197,94,0.75)'
+              : 'rgba(100,100,100,0.55)',
+            paddingHorizontal:10, paddingVertical:4,
+            borderRadius:8,
+          }}
+        >
+          <Text style={{color:'white', fontSize:11, fontWeight:'bold'}}>
+            {hapticEnabledDisplay ? '📳 Haptic ON' : '🔇 Haptic OFF'}
+          </Text>
+        </TouchableOpacity>
+
         {/* Detection boxes overlay */}
         <View style={StyleSheet.absoluteFill} pointerEvents="none">
-          {isCameraOn && isDetecting && detections.map((det: any, index: number) => (
-            <View
-              key={`box-${index}`}
-              style={{
-                position:    'absolute',
-                borderWidth: 2,
-                borderColor: activeModelColor,
-                left:   det.box_2d[0] * layout.width,
-                top:    det.box_2d[1] * layout.height,
-                width:  (det.box_2d[2] - det.box_2d[0]) * layout.width,
-                height: (det.box_2d[3] - det.box_2d[1]) * layout.height,
-              }}
-            >
-              <View style={{backgroundColor:'rgba(0,0,0,0.6)',
-                            paddingHorizontal:4}}>
-                <Text style={{fontSize:10, color:'white'}}>
-                  {det.label} {det.confidence}%
-                </Text>
+          {isCameraOn && isDetecting && detections.map((det: any, index: number) => {
+            const isImportant = det.important;
+            // Important objects get zone color, non-important get model color dimmed
+            const boxColor = isImportant
+              ? ZONE_COLORS[det.zone] ?? '#FFFFFF'
+              : activeModelColor + '88';   // dimmed with 53% opacity
+
+            return (
+              <View
+                key={`box-${index}`}
+                style={{
+                  position:    'absolute',
+                  borderWidth: isImportant ? 2.5 : 1.5,
+                  borderColor: boxColor,
+                  left:   det.box_2d[0] * layout.width,
+                  top:    det.box_2d[1] * layout.height,
+                  width:  (det.box_2d[2] - det.box_2d[0]) * layout.width,
+                  height: (det.box_2d[3] - det.box_2d[1]) * layout.height,
+                }}
+              >
+                <View style={{backgroundColor:'rgba(0,0,0,0.6)', paddingHorizontal:4}}>
+                  <Text style={{fontSize:10, color:'white'}}>
+                    {det.label} {det.confidence}%
+                    {isImportant && det.distance_cm
+                      ? `  ${(det.distance_cm / 100).toFixed(1)}m`
+                      : ''}
+                  </Text>
+                </View>
               </View>
-            </View>
-          ))}
+            );
+          })}
         </View>
 
         {/* Camera on/off — bottom left */}
@@ -253,12 +304,9 @@ export default function HomeScreen() {
           />
         </View>
 
-        {/* Settings button — bottom right ← NEW */}
+        {/* Settings — bottom right */}
         <TouchableOpacity
-          onPress={() => {
-            setTempIp(laptopIp);        // sync buffer before opening
-            setIsSettingsOpen(true);
-          }}
+          onPress={() => { setTempIp(laptopIp); setIsSettingsOpen(true); }}
           style={{
             position:'absolute', bottom:16, right:12,
             backgroundColor:'rgba(0,0,0,0.55)',
@@ -267,16 +315,13 @@ export default function HomeScreen() {
             borderWidth:1, borderColor:'rgba(255,255,255,0.15)',
           }}
         >
-          <Text style={{color:'white', fontSize:10}}>
-            ⚙️  {laptopIp}
-          </Text>
+          <Text style={{color:'white', fontSize:10}}>⚙️  {laptopIp}</Text>
         </TouchableOpacity>
       </View>
 
-      {/* ── RIGHT: Controls + Detections list ───────────────────────────── */}
+      {/* ── RIGHT: Controls + Detections list ───────────────────────── */}
       <View className="w-2/5 bg-gray-900 p-4 border-l border-gray-800 flex flex-col">
 
-        {/* Model switcher */}
         <Text className="text-white font-bold text-sm mb-2">Active Model</Text>
         <View className="mb-4 gap-2">
           {MODEL_OPTIONS.map(opt => (
@@ -285,61 +330,98 @@ export default function HomeScreen() {
               onPress={() => switchModel(opt.key)}
               disabled={switching}
               style={{
-                backgroundColor: activeModel === opt.key
-                  ? opt.color : '#374151',
-                padding: 10, borderRadius: 8,
+                backgroundColor: activeModel === opt.key ? opt.color : '#374151',
+                padding:10, borderRadius:8,
                 opacity: switching ? 0.5 : 1,
               }}
             >
-              <Text style={{
-                color: 'white', fontWeight: 'bold',
-                fontSize: 11, textAlign: 'center',
-              }}>
+              <Text style={{color:'white', fontWeight:'bold',
+                            fontSize:11, textAlign:'center'}}>
                 {opt.label}
               </Text>
             </TouchableOpacity>
           ))}
         </View>
 
-        {/* Detections list */}
         <Text className="text-white font-bold text-sm mb-2">
           Detected Obstacles
         </Text>
+
+        {/* Zone legend */}
+        <View style={{flexDirection:'row', gap:6, marginBottom:8}}>
+          {[['near','#EF4444'], ['medium','#F97316'], ['far','#22C55E']].map(([z, c]) => (
+            <View key={z} style={{flexDirection:'row', alignItems:'center', gap:3}}>
+              <View style={{width:8, height:8, borderRadius:4,
+                            backgroundColor:c}} />
+              <Text style={{color:'#9CA3AF', fontSize:9, textTransform:'capitalize'}}>
+                {z}
+              </Text>
+            </View>
+          ))}
+        </View>
+
         <ScrollView className="flex-1 mb-4">
           {detections.length === 0 ? (
             <Text className="text-gray-500 text-xs">
               {isDetecting ? "Scanning..." : "Press DETECT to start"}
             </Text>
           ) : (
-            detections.map((det: any, i: number) => (
-              <View key={i}
-                className="flex-row justify-between p-2 mb-2 bg-gray-800 rounded-lg">
-                <View>
-                  <Text className="text-white font-semibold capitalize">
-                    {det.label}
-                  </Text>
-                  <Text className="text-gray-400 text-xs">
-                    {det.confidence}% confidence
-                  </Text>
-                </View>
-              </View>
-            ))
+            detections
+              .slice()
+              // Sort: important first, then by zone priority
+              .sort((a: any, b: any) => {
+                if (a.important !== b.important) return a.important ? -1 : 1;
+                const priority: Record<string, number> =
+                  { near: 0, medium: 1, far: 2, unknown: 3 };
+                return (priority[a.zone] ?? 3) - (priority[b.zone] ?? 3);
+              })
+              .map((det: any, i: number) => {
+                const zoneColor = det.important
+                  ? ZONE_COLORS[det.zone] ?? '#FFFFFF'
+                  : '#6B7280';
+                return (
+                  <View key={i} style={{
+                    flexDirection:'row', justifyContent:'space-between',
+                    padding:8, marginBottom:6, borderRadius:8,
+                    backgroundColor: '#1F2937',
+                    borderLeftWidth: 3,
+                    borderLeftColor: zoneColor,
+                  }}>
+                    <View style={{flex:1}}>
+                      <Text style={{color:'white', fontWeight:'bold',
+                                    fontSize:12, textTransform:'capitalize'}}>
+                        {det.label}
+                        {det.important
+                          ? <Text style={{color: zoneColor}}> ●</Text>
+                          : ''}
+                      </Text>
+                      <Text style={{color:'#9CA3AF', fontSize:10}}>
+                        {det.confidence}% confidence
+                      </Text>
+                    </View>
+                    {det.important && det.distance_cm && (
+                      <Text style={{color: zoneColor, fontWeight:'bold',
+                                    alignSelf:'center', fontSize:13}}>
+                        {(det.distance_cm / 100).toFixed(1)}m
+                      </Text>
+                    )}
+                  </View>
+                );
+              })
           )}
         </ScrollView>
 
-        {/* Detect / Stop button */}
         <TouchableOpacity
           onPress={() => setIsDetecting(!isDetecting)}
-          // onPress={() => testConnection()}
           disabled={!isCameraOn}
           style={{
             backgroundColor: !isCameraOn
               ? '#4B5563'
               : isDetecting ? '#DC2626' : '#16A34A',
-            padding: 16, borderRadius: 12, alignItems: 'center',
+            padding:16, borderRadius:12, alignItems:'center',
           }}
         >
-          <Text style={{ color: 'white', fontWeight: 'bold', fontSize: 16 }}>
+          <Text style={{color:'white', fontWeight:'bold', fontSize:16}}>
             {isDetecting ? 'STOP' : 'DETECT'}
           </Text>
         </TouchableOpacity>
