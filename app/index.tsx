@@ -1,10 +1,10 @@
 import { StyleSheet, Text, View, Button,
          TouchableOpacity, ScrollView, Modal,
-         TextInput, Vibration } from 'react-native';
+         TextInput } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { useState, useEffect, useRef } from 'react';
 import * as ScreenOrientation from 'expo-screen-orientation';
-import * as Haptics from 'expo-haptics';
+import { useAudioPlayer } from 'expo-audio';
 
 const MODEL_OPTIONS = [
   { key: "yolo_pretrained",  label: "YOLO\nPretrained",  color: "#6B7280" },
@@ -18,13 +18,6 @@ const ZONE_COLORS: Record<string, string> = {
   medium:  '#F97316',   // orange
   far:     '#22C55E',   // green
   unknown: '#FFFFFF',   // white fallback
-};
-
-// Vibration patterns per zone (ms)
-const ZONE_VIBRATION: Record<string, number[]> = {
-  near:   [0, 80, 60, 80, 60, 80],   // three short pulses
-  medium: [0, 80, 60, 80],            // two short pulses
-  far:    [0, 120],                   // one pulse
 };
 
 const HAPTIC_COOLDOWN_MS = 3000;
@@ -46,6 +39,35 @@ export default function HomeScreen() {
   const layoutRef        = useRef({ width: 0, height: 0 });
   const [layout,         setLayout]           = useState({ width: 0, height: 0 });
   const lastHapticRef    = useRef<number>(0);   // timestamp of last haptic fire
+  const isDetectingRef = useRef(false);
+
+  const setDetecting = (val: boolean) => {
+    isDetectingRef.current = val;
+    setIsDetecting(val);
+  };
+
+
+  const nearPlayer  = useAudioPlayer(require('../assets/beep_near.mp3'));
+  const mediumPlayer = useAudioPlayer(require('../assets/beep_medium.mp3'));
+  const farPlayer   = useAudioPlayer(require('../assets/beep_far.mp3'));
+
+  // Add this right after:
+  useEffect(() => {
+    // Mute all players immediately on mount
+    nearPlayer.volume   = 0;
+    mediumPlayer.volume = 0;
+    farPlayer.volume    = 0;
+    nearPlayer.pause();
+    mediumPlayer.pause();
+    farPlayer.pause();
+    // Restore volume after mount settles
+    setTimeout(() => {
+      nearPlayer.volume   = 1;
+      mediumPlayer.volume = 1;
+      farPlayer.volume    = 1;
+    }, 500);
+  }, []);
+
 
   const serverUrl = `http://${laptopIp}:8000`;
 
@@ -55,7 +77,7 @@ export default function HomeScreen() {
 
   useEffect(() => { if (!isDetecting) setDetections([]); }, [isDetecting]);
   useEffect(() => {
-    if (!isCameraOn) { setDetections([]); setIsDetecting(false); }
+    if (!isCameraOn) { setDetections([]); setDetecting(false); }
   }, [isCameraOn]);
 
   const onLayout = (event: any) => {
@@ -65,20 +87,25 @@ export default function HomeScreen() {
   };
 
   // ── Haptic trigger — respects cooldown and toggle ─────────────────────────
-  const triggerHaptic = (zone: string) => {
+  const triggerAlert = (zone: string) => {
     if (!hapticEnabledRef.current) return;
     const now = Date.now();
     if (now - lastHapticRef.current < HAPTIC_COOLDOWN_MS) return;
     lastHapticRef.current = now;
 
-    // Use simple duration calls instead of pattern arrays
-    // Honor devices handle these more reliably
-    if (zone === 'near') {
-      Vibration.vibrate(500);        // one long 500ms buzz
-    } else if (zone === 'medium') {
-      Vibration.vibrate(250);        // medium 250ms buzz
-    } else if (zone === 'far') {
-      Vibration.vibrate(100);        // short 100ms buzz
+    try {
+      if (zone === 'near') {
+        nearPlayer.seekTo(0);
+        nearPlayer.play();
+      } else if (zone === 'medium') {
+        mediumPlayer.seekTo(0);
+        mediumPlayer.play();
+      } else if (zone === 'far') {
+        farPlayer.seekTo(0);
+        farPlayer.play();
+      }
+    } catch (e) {
+      console.error('Sound play error:', e);
     }
   };
 
@@ -87,7 +114,7 @@ export default function HomeScreen() {
   const switchModel = async (modelKey: string) => {
     if (modelKey === activeModel) return;
     setSwitching(true);
-    setIsDetecting(false);
+    setDetecting(false);
     return new Promise<void>((resolve) => {
       const xhr = new XMLHttpRequest();
       xhr.open('POST', `${serverUrl}/config/${modelKey}`);
@@ -99,7 +126,10 @@ export default function HomeScreen() {
 
   // ── Frame processing loop ─────────────────────────────────────────────────
   const processFrame = async () => {
-    if (!cameraRef.current || !isDetecting) { setDetections([]); return; }
+    if (!cameraRef.current || !isDetectingRef.current) { 
+      setDetections([]); 
+      return; 
+    }
     try {
       const photo = await cameraRef.current.takePictureAsync({
         quality: 0.3, base64: false, skipProcessing: true,
@@ -113,34 +143,44 @@ export default function HomeScreen() {
         const xhr = new XMLHttpRequest();
         xhr.open('POST', `${serverUrl}/detect`);
         xhr.onload = () => {
-          if (!isDetecting) { setDetections([]); resolve(); return; }
+          if (!isDetectingRef.current) { setDetections([]); resolve(); return; }
           try {
             const data = JSON.parse(xhr.responseText);
             const dets: any[] = data.detections ?? [];
             setDetections(dets);
 
-            // Haptic: find the highest priority important detection
-            // Priority: near > medium > far
             const important = dets.filter((d: any) => d.important);
             const nearObj   = important.find((d: any) => d.zone === 'near');
             const medObj    = important.find((d: any) => d.zone === 'medium');
             const farObj    = important.find((d: any) => d.zone === 'far');
             const trigger   = nearObj ?? medObj ?? farObj;
-            if (trigger) triggerHaptic(trigger.zone);
+            if (trigger) triggerAlert(trigger.zone);
 
           } catch (e) { console.error("Parse error:", e); }
           resolve();
         };
-        xhr.onerror = () => { setIsDetecting(false); setDetections([]); resolve(); };
+        xhr.onerror = () => { 
+          setDetecting(false); 
+          setDetections([]); 
+          resolve(); 
+        };
         xhr.send(formData);
       });
 
-      if (isDetecting) processFrame();
+      if (isDetectingRef.current) processFrame();
     } catch (error) {
       console.error("Detection Error:", error);
-      setIsDetecting(false); setDetections([]);
+      setDetecting(false); 
+      setDetections([]);
     }
   };
+
+  useEffect(() => { 
+    if (isDetecting) {
+      isDetectingRef.current = true;
+      processFrame(); 
+    }
+  }, [isDetecting]);
 
   useEffect(() => { if (isDetecting) processFrame(); }, [isDetecting]);
 
@@ -184,7 +224,7 @@ export default function HomeScreen() {
             <TouchableOpacity
               onPress={() => {
                 setLaptopIp(tempIp);
-                setIsDetecting(false);
+                setDetecting(false);
                 setDetections([]);
                 setIsCameraOn(false);
                 setIsSettingsOpen(false);
@@ -217,7 +257,7 @@ export default function HomeScreen() {
         )}
 
         {/* Center zone indicator — subtle vertical band */}
-        {isCameraOn && isDetecting && (
+        {isCameraOn && (
           <View pointerEvents="none" style={{
             position:    'absolute',
             left:        layout.width * 0.30,
@@ -257,7 +297,7 @@ export default function HomeScreen() {
           }}
         >
           <Text style={{color:'white', fontSize:11, fontWeight:'bold'}}>
-            {hapticEnabledDisplay ? '📳 Haptic ON' : '🔇 Haptic OFF'}
+            {hapticEnabledDisplay ? '🔔 Alert ON' : '🔕 Alert OFF'}
           </Text>
         </TouchableOpacity>
 
@@ -412,7 +452,7 @@ export default function HomeScreen() {
         </ScrollView>
 
         <TouchableOpacity
-          onPress={() => setIsDetecting(!isDetecting)}
+          onPress={() => setDetecting(!isDetecting)}
           disabled={!isCameraOn}
           style={{
             backgroundColor: !isCameraOn

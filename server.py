@@ -23,7 +23,7 @@ app.add_middleware(
 # ── CONFIG ─────────────────────────────────────────────────────────────────────
 DEVICE      = 'cuda' if torch.cuda.is_available() else 'cpu'
 TARGET_SIZE = 512
-NUM_CLASSES = 5
+NUM_CLASSES = 7
 CLASS_NAMES = ['barriers', 'foldout-signs', 'poles', 'railings', 'signs', 'curbs', 'potholes']
 
 # Get the directory where this script is located
@@ -32,9 +32,9 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 # Paths — relative to script location
 YOLO_PRETRAINED_PATH  = os.path.join(SCRIPT_DIR, "models/yolov8m.pt")
 YOLO_FINETUNED_PATH   = os.path.join(SCRIPT_DIR, "models/yolov8m_finetuned.pt")
-SSD_FINETUNED_PATH    = os.path.join(SCRIPT_DIR, "models/ssd_custom.pth")
+SSD_FINETUNED_PATH    = os.path.join(SCRIPT_DIR, "models/ssd_custom_v2.pth")
 # CENTER_FINETUNED_PATH = os.path.join(SCRIPT_DIR, "models/centernet_custom.pth")
-CENTER_FINETUNED_PATH = os.path.join(SCRIPT_DIR, "models/mobilenet_centernet_v2.pth")
+CENTER_FINETUNED_PATH = os.path.join(SCRIPT_DIR, "models/mobilenet_centernet_v4.pth")
 CENTER_BASE_WEIGHTS   = os.path.join(SCRIPT_DIR, "models/ctdet_coco_resdcn18.pth")
 
 # ── DISTANCE ESTIMATION CONFIG ─────────────────────────────────────────────────
@@ -107,7 +107,7 @@ KNOWN_WIDTHS_CM = {
     'bed':             160,
     'dining table':    120,
     'toilet':           40,
-    'tv':              120,
+    'tv':              55,
     'laptop':           35,
     'mouse':            10,
     'remote':           10,
@@ -125,6 +125,13 @@ KNOWN_WIDTHS_CM = {
     'teddy bear':       30,
     'hair drier':       15,
     'toothbrush':        2,
+    'poles':            30,
+    'barriers':         50,
+    'foldout-signs':    80, 
+    'railings':         100, 
+    'signs':            75, 
+    'curbs':            40, 
+    'potholes':         50
 }
 
 # Distance thresholds in cm
@@ -231,7 +238,7 @@ class MobileNetV3CenterNet(nn.Module):
         return [{'hm': self.hm(feat), 'wh': self.wh(feat), 'reg': self.reg(feat)}]
 
 def load_centernet_finetuned(weights_path):
-    model = MobileNetV3CenterNet(num_classes=5, pretrained=False)
+    model = MobileNetV3CenterNet(num_classes=7, pretrained=False)
     model.load_state_dict(torch.load(weights_path, map_location=DEVICE))
     return model.to(DEVICE).eval()
 
@@ -398,16 +405,24 @@ def run_hybrid_inference(img_bgr, conf_thresh=0.3):
 
     detections = []
     for box, score, lbl in zip(boxes, scores, labels):
-        lbl_int = max(0, min(4, int(round(lbl))))
+        lbl_int = max(0, min(len(CLASS_NAMES) - 1, int(round(lbl))))
         x1, y1, x2, y2 = box
         box_2d = [float(x1), float(y1), float(x2), float(y2)]
+
+        # Distance and zone
+        box_w_px = (x2 - x1) * TARGET_SIZE   # normalized width → pixel width at TARGET_SIZE
+        dist_cm  = estimate_distance(CLASS_NAMES[lbl_int], box_w_px)
+
+        zone     = get_zone(dist_cm)
+        in_center = is_in_center_zone(box_2d)
+
         detections.append({
             "label":       CLASS_NAMES[lbl_int],
             "confidence":  round(float(score) * 100),
             "box_2d":      box_2d,
-            "distance_cm": None,
-            "zone":        "unknown",
-            "important":   is_in_center_zone(box_2d),
+            "distance_cm": dist_cm,
+            "zone":        zone,
+            "important":   in_center,
         })
     return detections
 
