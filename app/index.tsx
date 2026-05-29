@@ -5,6 +5,7 @@ import { CameraView, useCameraPermissions } from 'expo-camera';
 import { useState, useEffect, useRef } from 'react';
 import * as ScreenOrientation from 'expo-screen-orientation';
 import { useAudioPlayer } from 'expo-audio';
+import * as Speech from 'expo-speech';
 
 const MODEL_OPTIONS = [
   { key: "yolo_pretrained",  label: "YOLO\nPretrained",  color: "#6B7280" },
@@ -34,12 +35,14 @@ export default function HomeScreen() {
   const [isSettingsOpen,  setIsSettingsOpen]  = useState(false);
   const hapticEnabledRef = useRef(true);
   const [hapticEnabledDisplay, setHapticEnabledDisplay] = useState(true);
+  const [layout,         setLayout]           = useState({ width: 0, height: 0 });
 
   const cameraRef        = useRef<CameraView>(null);
   const layoutRef        = useRef({ width: 0, height: 0 });
-  const [layout,         setLayout]           = useState({ width: 0, height: 0 });
   const lastHapticRef    = useRef<number>(0);   // timestamp of last haptic fire
   const isDetectingRef = useRef(false);
+  const voiceEnabledRef     = useRef(true);
+  const [voiceEnabledDisplay, setVoiceEnabledDisplay] = useState(true);
 
   const setDetecting = (val: boolean) => {
     isDetectingRef.current = val;
@@ -76,8 +79,13 @@ export default function HomeScreen() {
   }, []);
 
   useEffect(() => { if (!isDetecting) setDetections([]); }, [isDetecting]);
+  // Add to the existing isCameraOn useEffect:
   useEffect(() => {
-    if (!isCameraOn) { setDetections([]); setDetecting(false); }
+    if (!isCameraOn) {
+      setDetections([]);
+      setIsDetecting(false);
+      Speech.stop();   // ← add this
+    }
   }, [isCameraOn]);
 
   const onLayout = (event: any) => {
@@ -87,25 +95,50 @@ export default function HomeScreen() {
   };
 
   // ── Haptic trigger — respects cooldown and toggle ─────────────────────────
-  const triggerAlert = (zone: string) => {
-    if (!hapticEnabledRef.current) return;
+  const triggerAlert = async (zone: string, hasDetections: boolean) => {
     const now = Date.now();
     if (now - lastHapticRef.current < HAPTIC_COOLDOWN_MS) return;
+
+    const audioOn = hapticEnabledRef.current;
+    const voiceOn = voiceEnabledRef.current;
+
+    if (!audioOn && !voiceOn) return;
+
     lastHapticRef.current = now;
 
-    try {
-      if (zone === 'near') {
-        nearPlayer.seekTo(0);
-        nearPlayer.play();
-      } else if (zone === 'medium') {
-        mediumPlayer.seekTo(0);
-        mediumPlayer.play();
-      } else if (zone === 'far') {
-        farPlayer.seekTo(0);
-        farPlayer.play();
+    // ── Voice message map ────────────────────────────────────────────────────
+    const VOICE_MESSAGES: Record<string, string> = {
+      near:        'Obstacle very close',
+      medium:      'Obstacle nearby',
+      far:         'Obstacle ahead',
+      unknown:     'Obstacle far ahead',
+      clear:       'Path is clear',
+    };
+
+    const voiceKey = !hasDetections ? 'clear' : (zone ?? 'unknown');
+    const message  = VOICE_MESSAGES[voiceKey] ?? 'Obstacle detected';
+
+    if (audioOn) {
+      try {
+        if (zone === 'near')        { nearPlayer.seekTo(0);   nearPlayer.play(); }
+        else if (zone === 'medium') { mediumPlayer.seekTo(0); mediumPlayer.play(); }
+        else if (zone === 'far')    { farPlayer.seekTo(0);    farPlayer.play(); }
+      } catch (e) {
+        console.error('Audio error:', e);
       }
-    } catch (e) {
-      console.error('Sound play error:', e);
+    }
+
+    if (voiceOn) {
+      // If audio played, wait a moment before speaking
+      if (audioOn) await new Promise(r => setTimeout(r, 600));
+
+      // Cancel any ongoing speech before starting new
+      Speech.stop();
+      Speech.speak(message, {
+        language: 'en',
+        pitch:    1.0,
+        rate:     1.1,    // slightly faster than default for responsiveness
+      });
     }
   };
 
@@ -149,12 +182,25 @@ export default function HomeScreen() {
             const dets: any[] = data.detections ?? [];
             setDetections(dets);
 
-            const important = dets.filter((d: any) => d.important);
-            const nearObj   = important.find((d: any) => d.zone === 'near');
-            const medObj    = important.find((d: any) => d.zone === 'medium');
-            const farObj    = important.find((d: any) => d.zone === 'far');
-            const trigger   = nearObj ?? medObj ?? farObj;
-            if (trigger) triggerAlert(trigger.zone);
+            const important    = dets.filter((d: any) => d.important);
+            const hasImportant = important.length > 0;
+
+            if (hasImportant) {
+              // Find highest priority zone
+              const nearObj   = important.find((d: any) => d.zone === 'near');
+              const medObj    = important.find((d: any) => d.zone === 'medium');
+              const farObj    = important.find((d: any) => d.zone === 'far');
+              const unknObj   = important.find((d: any) => d.zone === 'unknown');
+              const trigger   = nearObj ?? medObj ?? farObj ?? unknObj;
+              if (trigger) triggerAlert(trigger.zone, true);
+            } else {
+              // No important detections — path is clear
+              // Use a longer cooldown for "clear" to avoid it firing constantly
+              const now = Date.now();
+              if (now - lastHapticRef.current >= HAPTIC_COOLDOWN_MS * 2) {
+                triggerAlert('clear', false);
+              }
+            }
 
           } catch (e) { console.error("Parse error:", e); }
           resolve();
@@ -181,8 +227,6 @@ export default function HomeScreen() {
       processFrame(); 
     }
   }, [isDetecting]);
-
-  useEffect(() => { if (isDetecting) processFrame(); }, [isDetecting]);
 
   if (!permission) return <View />;
   if (!permission.granted) {
@@ -282,10 +326,11 @@ export default function HomeScreen() {
         </View>
 
         {/* Haptic toggle — top right */}
+        {/* Audio alert toggle — top right */}
         <TouchableOpacity
           onPress={() => {
             hapticEnabledRef.current = !hapticEnabledRef.current;
-            setHapticEnabledDisplay(hapticEnabledRef.current);  // just for UI display
+            setHapticEnabledDisplay(hapticEnabledRef.current);
           }}
           style={{
             position:'absolute', top:12, right:12,
@@ -297,7 +342,28 @@ export default function HomeScreen() {
           }}
         >
           <Text style={{color:'white', fontSize:11, fontWeight:'bold'}}>
-            {hapticEnabledDisplay ? '🔔 Alert ON' : '🔕 Alert OFF'}
+            {hapticEnabledDisplay ? '🔔 Audio ON' : '🔕 Audio OFF'}
+          </Text>
+        </TouchableOpacity>
+
+        {/* Voice alert toggle — below audio toggle */}
+        <TouchableOpacity
+          onPress={() => {
+            voiceEnabledRef.current = !voiceEnabledRef.current;
+            setVoiceEnabledDisplay(voiceEnabledRef.current);
+            if (!voiceEnabledRef.current) Speech.stop();
+          }}
+          style={{
+            position:'absolute', top:48, right:12,
+            backgroundColor: voiceEnabledDisplay
+              ? 'rgba(59,130,246,0.75)'
+              : 'rgba(100,100,100,0.55)',
+            paddingHorizontal:10, paddingVertical:4,
+            borderRadius:8,
+          }}
+        >
+          <Text style={{color:'white', fontSize:11, fontWeight:'bold'}}>
+            {voiceEnabledDisplay ? '🗣 Voice ON' : '🔇 Voice OFF'}
           </Text>
         </TouchableOpacity>
 
