@@ -33,17 +33,19 @@ export default function HomeScreen() {
   const [laptopIp,        setLaptopIp]        = useState("192.168.68.100");
   const [tempIp,          setTempIp]          = useState("192.168.68.100");
   const [isSettingsOpen,  setIsSettingsOpen]  = useState(false);
-  const hapticEnabledRef = useRef(true);
   const [hapticEnabledDisplay, setHapticEnabledDisplay] = useState(true);
   const [layout,         setLayout]           = useState({ width: 0, height: 0 });
-
+  const [directionEnabledDisplay, setDirectionEnabledDisplay] = useState(true);
+  
+  const hapticEnabledRef = useRef(true);
   const cameraRef        = useRef<CameraView>(null);
   const layoutRef        = useRef({ width: 0, height: 0 });
   const lastHapticRef    = useRef<number>(0);   // timestamp of last haptic fire
   const isDetectingRef = useRef(false);
   const voiceEnabledRef     = useRef(true);
   const [voiceEnabledDisplay, setVoiceEnabledDisplay] = useState(true);
-
+  const directionEnabledRef     = useRef(true);
+  
   const setDetecting = (val: boolean) => {
     isDetectingRef.current = val;
     setIsDetecting(val);
@@ -94,31 +96,52 @@ export default function HomeScreen() {
     setLayout({ width, height });
   };
 
-  // ── Haptic trigger — respects cooldown and toggle ─────────────────────────
-  const triggerAlert = async (zone: string, hasDetections: boolean) => {
+  const triggerAlert = async (zone: string, hasDetections: boolean, det?: any) => {
     const now = Date.now();
     if (now - lastHapticRef.current < HAPTIC_COOLDOWN_MS) return;
 
-    const audioOn = hapticEnabledRef.current;
-    const voiceOn = voiceEnabledRef.current;
+    const audioOn     = hapticEnabledRef.current;
+    const voiceOn     = voiceEnabledRef.current;
+    const directionOn = directionEnabledRef.current;
 
-    if (!audioOn && !voiceOn) return;
+    if (!audioOn && !voiceOn && !directionOn) return;
 
     lastHapticRef.current = now;
 
-    // ── Voice message map ────────────────────────────────────────────────────
     const VOICE_MESSAGES: Record<string, string> = {
-      near:        'Obstacle very close',
-      medium:      'Obstacle nearby',
-      far:         'Obstacle ahead',
-      unknown:     'Obstacle far ahead',
-      clear:       'Path is clear',
+      near:    'Obstacle very close',
+      medium:  'Obstacle nearby',
+      far:     'Obstacle ahead',
+      unknown: 'Obstacle far ahead',
+      clear:   'Path is clear',
     };
+
+    // ── Direction from bounding box center x ──────────────────────────────
+    let directionMessage = '';
+    if (det && directionOn && hasDetections) {
+      const x1 = det.box_2d[0];
+      const x2 = det.box_2d[2];
+      const boxWidth = x2 - x1;
+
+      // How much of the box overlaps each zone
+      const leftOverlap   = Math.max(0, Math.min(x2, 0.30) - Math.max(x1, 0.00)) / boxWidth;
+      const middleOverlap = Math.max(0, Math.min(x2, 0.70) - Math.max(x1, 0.30)) / boxWidth;
+      const rightOverlap  = Math.max(0, Math.min(x2, 1.00) - Math.max(x1, 0.70)) / boxWidth;
+
+      if (middleOverlap >= leftOverlap && middleOverlap >= rightOverlap) {
+        directionMessage = 'ahead of you';
+      } else if (leftOverlap > rightOverlap) {
+        directionMessage = 'on your left';
+      } else {
+        directionMessage = 'on your right';
+      }
+    }
 
     const voiceKey = !hasDetections ? 'clear' : (zone ?? 'unknown');
     const message  = VOICE_MESSAGES[voiceKey] ?? 'Obstacle detected';
 
-    if (audioOn) {
+    // ── Audio first ────────────────────────────────────────────────────────
+    if (audioOn && hasDetections) {
       try {
         if (zone === 'near')        { nearPlayer.seekTo(0);   nearPlayer.play(); }
         else if (zone === 'medium') { mediumPlayer.seekTo(0); mediumPlayer.play(); }
@@ -128,16 +151,28 @@ export default function HomeScreen() {
       }
     }
 
+    // ── Voice zone alert ───────────────────────────────────────────────────
     if (voiceOn) {
-      // If audio played, wait a moment before speaking
-      if (audioOn) await new Promise(r => setTimeout(r, 600));
-
-      // Cancel any ongoing speech before starting new
+      if (audioOn && hasDetections) await new Promise(r => setTimeout(r, 600));
       Speech.stop();
-      Speech.speak(message, {
+      await new Promise<void>((resolve) => {
+        Speech.speak(message, {
+          language: 'en',
+          pitch:    1.0,
+          rate:     1.1,
+          onDone:   () => resolve(),
+          onError:  () => resolve(),
+        });
+      });
+    }
+
+    // ── Direction alert — plays after voice finishes ───────────────────────
+    if (directionOn && directionMessage && hasDetections) {
+      if (voiceOn) await new Promise(r => setTimeout(r, 200));
+      Speech.speak(directionMessage, {
         language: 'en',
         pitch:    1.0,
-        rate:     1.1,    // slightly faster than default for responsiveness
+        rate:     1.1,
       });
     }
   };
@@ -182,17 +217,17 @@ export default function HomeScreen() {
             const dets: any[] = data.detections ?? [];
             setDetections(dets);
 
-            const important    = dets.filter((d: any) => d.important);
-            const hasImportant = important.length > 0;
+            const hasDetections = dets.length > 0;
 
-            if (hasImportant) {
-              // Find highest priority zone
-              const nearObj   = important.find((d: any) => d.zone === 'near');
-              const medObj    = important.find((d: any) => d.zone === 'medium');
-              const farObj    = important.find((d: any) => d.zone === 'far');
-              const unknObj   = important.find((d: any) => d.zone === 'unknown');
-              const trigger   = nearObj ?? medObj ?? farObj ?? unknObj;
-              if (trigger) triggerAlert(trigger.zone, true);
+            if (hasDetections) {
+              // Priority: near > medium > far > unknown, across ALL detections
+              const byPriority = ['near', 'medium', 'far', 'unknown'];
+              let trigger: any = null;
+              for (const zone of byPriority) {
+                trigger = dets.find((d: any) => d.zone === zone);
+                if (trigger) break;
+              }
+              if (trigger) triggerAlert(trigger.zone, true, trigger);
             } else {
               // No important detections — path is clear
               // Use a longer cooldown for "clear" to avoid it firing constantly
@@ -367,21 +402,40 @@ export default function HomeScreen() {
           </Text>
         </TouchableOpacity>
 
+        {/* Direction alert toggle */}
+        <TouchableOpacity
+          onPress={() => {
+            directionEnabledRef.current = !directionEnabledRef.current;
+            setDirectionEnabledDisplay(directionEnabledRef.current);
+            if (!directionEnabledRef.current) Speech.stop();
+          }}
+          style={{
+            position:'absolute', top:84, right:12,
+            backgroundColor: directionEnabledDisplay
+              ? 'rgba(234,179,8,0.75)'
+              : 'rgba(100,100,100,0.55)',
+            paddingHorizontal:10, paddingVertical:4,
+            borderRadius:8,
+          }}
+        >
+          <Text style={{color:'white', fontSize:11, fontWeight:'bold'}}>
+            {directionEnabledDisplay ? '🧭 Direction ON' : '🧭 Direction OFF'}
+          </Text>
+        </TouchableOpacity>
+
         {/* Detection boxes overlay */}
         <View style={StyleSheet.absoluteFill} pointerEvents="none">
           {isCameraOn && isDetecting && detections.map((det: any, index: number) => {
             const isImportant = det.important;
             // Important objects get zone color, non-important get model color dimmed
-            const boxColor = isImportant
-              ? ZONE_COLORS[det.zone] ?? '#FFFFFF'
-              : activeModelColor + '88';   // dimmed with 53% opacity
+            const boxColor = ZONE_COLORS[det.zone] ?? activeModelColor;
 
             return (
               <View
                 key={`box-${index}`}
                 style={{
                   position:    'absolute',
-                  borderWidth: isImportant ? 2.5 : 1.5,
+                  borderWidth: 2,
                   borderColor: boxColor,
                   left:   det.box_2d[0] * layout.width,
                   top:    det.box_2d[1] * layout.height,
@@ -482,9 +536,7 @@ export default function HomeScreen() {
                 return (priority[a.zone] ?? 3) - (priority[b.zone] ?? 3);
               })
               .map((det: any, i: number) => {
-                const zoneColor = det.important
-                  ? ZONE_COLORS[det.zone] ?? '#FFFFFF'
-                  : '#6B7280';
+                const zoneColor = ZONE_COLORS[det.zone] ?? '#6B7280';
                 return (
                   <View key={i} style={{
                     flexDirection:'row', justifyContent:'space-between',
@@ -496,16 +548,13 @@ export default function HomeScreen() {
                     <View style={{flex:1}}>
                       <Text style={{color:'white', fontWeight:'bold',
                                     fontSize:12, textTransform:'capitalize'}}>
-                        {det.label}
-                        {det.important
-                          ? <Text style={{color: zoneColor}}> ●</Text>
-                          : ''}
+                        {det.label}<Text style={{color: zoneColor}}> ●</Text>
                       </Text>
                       <Text style={{color:'#9CA3AF', fontSize:10}}>
                         {det.confidence}% confidence
                       </Text>
                     </View>
-                    {det.important && det.distance_cm && (
+                    {det.distance_cm && (
                       <Text style={{color: zoneColor, fontWeight:'bold',
                                     alignSelf:'center', fontSize:13}}>
                         {(det.distance_cm / 100).toFixed(1)}m
