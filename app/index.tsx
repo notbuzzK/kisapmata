@@ -6,6 +6,7 @@ import { useState, useEffect, useRef } from 'react';
 import * as ScreenOrientation from 'expo-screen-orientation';
 import { useAudioPlayer } from 'expo-audio';
 import * as Speech from 'expo-speech';
+import Slider from '@react-native-community/slider';
 
 const MODEL_OPTIONS = [
   { key: "yolo_pretrained",  label: "YOLO\nPretrained",  color: "#6B7280" },
@@ -36,6 +37,7 @@ export default function HomeScreen() {
   const [hapticEnabledDisplay, setHapticEnabledDisplay] = useState(true);
   const [layout,         setLayout]           = useState({ width: 0, height: 0 });
   const [directionEnabledDisplay, setDirectionEnabledDisplay] = useState(true);
+  const [confThreshold, setConfThreshold] = useState(40);  // 0-100
   
   const hapticEnabledRef = useRef(true);
   const cameraRef        = useRef<CameraView>(null);
@@ -275,6 +277,9 @@ export default function HomeScreen() {
 
   const activeModelLabel = MODEL_OPTIONS.find(m => m.key === activeModel)?.label ?? "";
   const activeModelColor = MODEL_OPTIONS.find(m => m.key === activeModel)?.color ?? "#fff";
+  const visibleDetections = detections.filter(
+  (d: any) => d.confidence >= confThreshold
+);
 
   return (
     <View className='flex flex-row h-full bg-black'>
@@ -425,7 +430,7 @@ export default function HomeScreen() {
 
         {/* Detection boxes overlay */}
         <View style={StyleSheet.absoluteFill} pointerEvents="none">
-          {isCameraOn && isDetecting && detections.map((det: any, index: number) => {
+          {isCameraOn && isDetecting && visibleDetections.map((det: any, index: number) => {
             const isImportant = det.important;
             // Important objects get zone color, non-important get model color dimmed
             const boxColor = ZONE_COLORS[det.zone] ?? activeModelColor;
@@ -437,6 +442,7 @@ export default function HomeScreen() {
                   position:    'absolute',
                   borderWidth: 2,
                   borderColor: boxColor,
+                  opacity:     det.important ? 1.0 : 0.5,   // center = full, outside = dimmed
                   left:   det.box_2d[0] * layout.width,
                   top:    det.box_2d[1] * layout.height,
                   width:  (det.box_2d[2] - det.box_2d[0]) * layout.width,
@@ -507,26 +513,44 @@ export default function HomeScreen() {
           Detected Obstacles
         </Text>
 
-        {/* Zone legend */}
-        <View style={{flexDirection:'row', gap:6, marginBottom:8}}>
-          {[['near','#EF4444'], ['medium','#F97316'], ['far','#22C55E']].map(([z, c]) => (
-            <View key={z} style={{flexDirection:'row', alignItems:'center', gap:3}}>
-              <View style={{width:8, height:8, borderRadius:4,
-                            backgroundColor:c}} />
-              <Text style={{color:'#9CA3AF', fontSize:9, textTransform:'capitalize'}}>
-                {z}
-              </Text>
-            </View>
-          ))}
+        {/* Zone legend + confidence threshold */}
+        <View style={{marginBottom:8}}>
+          {/* Zone color legend */}
+          <View style={{flexDirection:'row', gap:6, marginBottom:6}}>
+            {[['near','#EF4444'], ['medium','#F97316'], ['far','#22C55E']].map(([z, c]) => (
+              <View key={z} style={{flexDirection:'row', alignItems:'center', gap:3}}>
+                <View style={{width:8, height:8, borderRadius:4, backgroundColor:c}} />
+                <Text style={{color:'#9CA3AF', fontSize:9, textTransform:'capitalize'}}>{z}</Text>
+              </View>
+            ))}
+          </View>
+
+          {/* Confidence threshold slider */}
+          <View style={{flexDirection:'row', alignItems:'center', gap:4}}>
+            <Text style={{color:'#9CA3AF', fontSize:9, width:20}}>{confThreshold}%</Text>
+            <Slider
+              style={{flex:1, height:20}}
+              minimumValue={0}
+              maximumValue={90}
+              step={5}
+              value={confThreshold}
+              onValueChange={setConfThreshold}
+              minimumTrackTintColor="#16A34A"
+              maximumTrackTintColor="#374151"
+              thumbTintColor="#FFFFFF"
+            />
+            <Text style={{color:'#9CA3AF', fontSize:9}}>min conf</Text>
+          </View>
         </View>
 
+
         <ScrollView className="flex-1 mb-4">
-          {detections.length === 0 ? (
+          {visibleDetections.length === 0 ? (
             <Text className="text-gray-500 text-xs">
               {isDetecting ? "Scanning..." : "Press DETECT to start"}
             </Text>
           ) : (
-            detections
+            visibleDetections
               .slice()
               // Sort: important first, then by zone priority
               .sort((a: any, b: any) => {
