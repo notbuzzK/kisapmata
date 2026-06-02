@@ -6,7 +6,7 @@ import { useState, useEffect, useRef } from 'react';
 import * as ScreenOrientation from 'expo-screen-orientation';
 import { useAudioPlayer } from 'expo-audio';
 import * as Speech from 'expo-speech';
-import Slider from '@react-native-community/slider';
+import { Slider } from '@miblanchard/react-native-slider';
 
 const MODEL_OPTIONS = [
   { key: "yolo_pretrained",  label: "YOLO\nPretrained",  color: "#6B7280" },
@@ -529,12 +529,12 @@ export default function HomeScreen() {
           <View style={{flexDirection:'row', alignItems:'center', gap:4}}>
             <Text style={{color:'#9CA3AF', fontSize:9, width:20}}>{confThreshold}%</Text>
             <Slider
-              style={{flex:1, height:20}}
+              containerStyle={{flex:1, height:20}}
               minimumValue={0}
               maximumValue={90}
               step={5}
               value={confThreshold}
-              onValueChange={setConfThreshold}
+              onValueChange={(val: number[]) => setConfThreshold(val[0])}
               minimumTrackTintColor="#16A34A"
               maximumTrackTintColor="#374151"
               thumbTintColor="#FFFFFF"

@@ -24,8 +24,12 @@
       "permissions": [
         "android.permission.CAMERA",
         "VIBRATE",
-        "USE_VIBRATE"
+        "USE_VIBRATE",
+        "RECORD_AUDIO",
+        "MODIFY_AUDIO_SETTINGS"
       ],
+      "blockedPermissions": [],
+      "jsEngine": "hermes",
       "package": "com.notbuzz.kisapmata"
     },
     "web": {
@@ -78,7 +82,15 @@
           }
         }
       ],
-      "expo-audio"
+      [
+        "expo-audio",
+        {
+          "enableBackgroundPlayback": false,
+          "enableBackgroundRecording": false
+        }
+      ],
+      "expo-font",
+      "expo-web-browser"
     ],
     "experiments": {
       "typedRoutes": true,
